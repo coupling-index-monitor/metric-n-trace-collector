@@ -71,42 +71,16 @@ func ConnectToMongoDB() (*mongo.Client, error) {
 }
 
 func (c *Container) CalculateMetricAndPushToDB() {
+	log.Println()
 	log.Printf("Running cron job Calculate And Push Metrics at %v...", time.Now().Format(time.RFC3339))
 
 	end_time := time.Now().UnixMicro()
 	start_time := end_time - (15 * time.Minute).Microseconds()
 	log.Println("Setting Start time:", start_time, "End time:", end_time)
 
-	client, err := ConnectToMongoDB()
-	if err != nil {
-		log.Fatal("Error connecting to MongoDB:", err)
-		log.Println("Skipping this job..")
+	start_time, shouldReturn := c.getStartTime(start_time, end_time)
+	if shouldReturn {
 		return
-	}
-	defer client.Disconnect(context.TODO())
-	updateLogCollectionObj := client.Database(c.MONGO_DB).Collection(c.UpdateLogCollection)
-
-	query := bson.M{}
-	opts := options.Find().SetSort(bson.D{{Key: "last_fetch_time", Value: -1}}).SetLimit(1)
-
-	cursor, err := updateLogCollectionObj.Find(context.TODO(), query, opts)
-	if err != nil {
-		log.Printf("Error fetching last fetch time: %v\n", err)
-		return
-	}
-	defer cursor.Close(context.TODO())
-
-	if cursor.Next(context.TODO()) {
-		var result bson.M
-		if err := cursor.Decode(&result); err != nil {
-			log.Printf("Error decoding fetch time: %v\n", err)
-			return
-		}
-		log.Printf("Last fetch time found: %v and is before start_time: %t ", result["last_fetch_time"].(int64), result["last_fetch_time"].(int64) < start_time)
-		start_time = result["last_fetch_time"].(int64)
-		log.Printf("Setting start_time: %d, end_time: %d \n", start_time, end_time)
-	} else {
-		log.Println("No previous fetch time found, setting start_time to 15 minutes ago")
 	}
 
 	graph_data, err := c.CalculateMetric(start_time, end_time)
@@ -127,6 +101,41 @@ func (c *Container) CalculateMetricAndPushToDB() {
 	}); err != nil {
 		log.Println("Error saving to MongoDB:", err)
 	}
+}
+
+func (c *Container) getStartTime(start_time int64, end_time int64) (int64, bool) {
+	client, err := ConnectToMongoDB()
+	if err != nil {
+		log.Fatal("Error connecting to MongoDB:", err)
+		log.Println("Skipping this job..")
+		return 0, true
+	}
+	defer client.Disconnect(context.TODO())
+	updateLogCollectionObj := client.Database(c.MONGO_DB).Collection(c.UpdateLogCollection)
+
+	query := bson.M{}
+	opts := options.Find().SetSort(bson.D{{Key: "last_fetch_time", Value: -1}}).SetLimit(1)
+
+	cursor, err := updateLogCollectionObj.Find(context.TODO(), query, opts)
+	if err != nil {
+		log.Printf("Error fetching last fetch time: %v\n", err)
+		return 0, true
+	}
+	defer cursor.Close(context.TODO())
+
+	if cursor.Next(context.TODO()) {
+		var result bson.M
+		if err := cursor.Decode(&result); err != nil {
+			log.Printf("Error decoding fetch time: %v\n", err)
+			return 0, true
+		}
+		log.Printf("Last fetch time found: %v and is before start_time: %t ", result["last_fetch_time"].(int64), result["last_fetch_time"].(int64) < start_time)
+		start_time = result["last_fetch_time"].(int64)
+		log.Printf("Setting start_time: %d, end_time: %d \n", start_time, end_time)
+	} else {
+		log.Println("No previous fetch time found, setting start_time to 15 minutes ago")
+	}
+	return start_time, false
 }
 
 func (c *Container) CalculateMetric(start_time int64, end_time int64) (GraphData, error) {
