@@ -43,195 +43,191 @@ type WeightedGraphResponse struct {
 }
 
 type Metrics struct {
-	StartTime int64
-	EndTime   int64
-	Data      GraphData
+	StartTime int64     `bson:"start_time"`
+	EndTime   int64     `bson:"end_time"`
+	Data      GraphData `bson:"data"`
 }
 
 type UpdateLog struct {
 	LastFetchTime int64 `bson:"last_fetch_time"`
 }
 
-var MONGO_URI string
-
 type Container struct {
-	GET_WEIGHT_GRAPH_API string
-	MONGO_DB             string
-	MetricsCollection    string
-	UpdateLogCollection  string
-}
-
-func ConnectToMongoDB() (*mongo.Client, error) {
-	client, err := mongo.Connect(context.TODO(), options.Client().ApplyURI(MONGO_URI))
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to MongoDB: %v", err)
-	}
-	log.Println("Connected to MongoDB successfully.")
-	return client, nil
-}
-
-func (c *Container) CalculateMetricAndPushToDB() {
-	log.Println()
-	log.Printf("Running cron job Calculate And Push Metrics at %v...", time.Now().Format(time.RFC3339))
-
-	end_time := time.Now().UnixMicro()
-	start_time := end_time - (15 * time.Minute).Microseconds()
-	log.Println("Setting Start time:", start_time, "End time:", end_time)
-
-	start_time, shouldReturn := c.getStartTime(start_time, end_time)
-	if shouldReturn {
-		return
-	}
-
-	graph_data, err := c.CalculateMetric(start_time, end_time)
-	if err != nil {
-		log.Println("Error calculating metrics:", err)
-		return
-	}
-
-	if len(graph_data.Nodes) == 0 || len(graph_data.Edges) == 0 {
-		log.Println("Graph data is empty. Skipping push to MongoDB.")
-		return
-	}
-
-	if err := c.PushToDB(Metrics{
-		StartTime: start_time,
-		EndTime:   end_time,
-		Data:      graph_data,
-	}); err != nil {
-		log.Println("Error saving to MongoDB:", err)
-	}
-}
-
-func (c *Container) getStartTime(start_time int64, end_time int64) (int64, bool) {
-	client, err := ConnectToMongoDB()
-	if err != nil {
-		log.Fatal("Error connecting to MongoDB:", err)
-		log.Println("Skipping this job..")
-		return 0, true
-	}
-	defer client.Disconnect(context.TODO())
-	updateLogCollectionObj := client.Database(c.MONGO_DB).Collection(c.UpdateLogCollection)
-
-	query := bson.M{}
-	opts := options.Find().SetSort(bson.D{{Key: "last_fetch_time", Value: -1}}).SetLimit(1)
-
-	cursor, err := updateLogCollectionObj.Find(context.TODO(), query, opts)
-	if err != nil {
-		log.Printf("Error fetching last fetch time: %v\n", err)
-		return 0, true
-	}
-	defer cursor.Close(context.TODO())
-
-	if cursor.Next(context.TODO()) {
-		var result bson.M
-		if err := cursor.Decode(&result); err != nil {
-			log.Printf("Error decoding fetch time: %v\n", err)
-			return 0, true
-		}
-		log.Printf("Last fetch time found: %v and is before start_time: %t ", result["last_fetch_time"].(int64), result["last_fetch_time"].(int64) < start_time)
-		start_time = result["last_fetch_time"].(int64)
-		log.Printf("Setting start_time: %d, end_time: %d \n", start_time, end_time)
-	} else {
-		log.Println("No previous fetch time found, setting start_time to 15 minutes ago")
-	}
-	return start_time, false
-}
-
-func (c *Container) CalculateMetric(start_time int64, end_time int64) (GraphData, error) {
-	log.Println("Calculating metrics for time period:", start_time, end_time)
-	url := fmt.Sprintf(c.GET_WEIGHT_GRAPH_API, start_time, end_time)
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return GraphData{}, fmt.Errorf("failed to get weighted graph for time period %v - %v Error: %v", start_time, end_time, err)
-	}
-	log.Println("Received response from API:", resp.Status)
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return GraphData{}, fmt.Errorf("failed to read response body: %v", err)
-	}
-	log.Println("Response body:", string(body)[:10])
-
-	var weightedGraphResp WeightedGraphResponse
-	if err := json.Unmarshal(body, &weightedGraphResp); err != nil {
-		return GraphData{}, fmt.Errorf("failed to unmarshal JSON: %v", err)
-	}
-	log.Println("Unmarshalled JSON with data:", weightedGraphResp.Data)
-
-	return weightedGraphResp.Data, nil
-}
-
-func (c *Container) PushToDB(data Metrics) error {
-	if data.Data.Nodes == nil || data.Data.Edges == nil {
-		log.Println("Graph data is empty. Skipping push to MongoDB.")
-		return nil
-	}
-
-	log.Println("Pushing graph to MongoDB...")
-
-	client, err := ConnectToMongoDB()
-	if err != nil {
-		log.Fatal("Error connecting to MongoDB:", err)
-		log.Println("Skipping this job..")
-		return err
-	}
-
-	log.Println("Inserting graph to MongoDB...")
-	metricsCollectionObj := client.Database(c.MONGO_DB).Collection(c.MetricsCollection)
-	updateLogCollectionObj := client.Database(c.MONGO_DB).Collection(c.UpdateLogCollection)
-	defer client.Disconnect(context.TODO())
-
-	_, err = metricsCollectionObj.InsertOne(context.TODO(), data)
-	if err != nil {
-		return fmt.Errorf("failed to insert graph: %v", err)
-	}
-	log.Println("Graph saved to MongoDB successfully.")
-
-	log.Printf("Updating last fetched time %v", data.EndTime)
-	_, err = updateLogCollectionObj.InsertOne(context.TODO(), UpdateLog{LastFetchTime: data.EndTime})
-	if err != nil {
-		return fmt.Errorf("failed to update last fetched time: %v", err)
-	}
-	log.Println("Last updated time saved successfully.")
-
-	return nil
+	GraphAPIURL         string
+	DatabaseName        string
+	MetricsCollection   string
+	UpdateLogCollection string
+	MongoClient         *mongo.Client
+	HTTPClient          *http.Client
 }
 
 func main() {
-	log.Println("Starting cron job...")
+	log.Println("Starting service...")
+
+	// Load environment
 	if err := godotenv.Load(); err != nil {
-		log.Fatal("Error loading .env file. Make sure the .env file exists and contains the required variables.")
+		log.Fatal("Failed to load .env file")
 	}
 
-	var container = Container{
-		GET_WEIGHT_GRAPH_API: os.Getenv("GET_WEIGHT_GRAPH_API"),
-		MONGO_DB:             os.Getenv("MONGO_DB"),
-		MetricsCollection:    os.Getenv("MetricsCollection"),
-		UpdateLogCollection:  os.Getenv("UpdateLogCollection"),
+	requiredEnv := []string{"MONGO_URI", "GET_WEIGHT_GRAPH_API", "MONGO_DB", "MetricsCollection", "UpdateLogCollection"}
+	for _, env := range requiredEnv {
+		if os.Getenv(env) == "" {
+			log.Fatalf("Missing required environment variable: %s", env)
+		}
 	}
-	MONGO_URI = os.Getenv("MONGO_URI")
 
-	done := make(chan os.Signal, 15)
-	signal.Notify(done, syscall.SIGINT, syscall.SIGTERM)
-	c := cron.New()
+	// Setup MongoDB connection
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	_, err := c.AddFunc("*/1 * * * *", container.CalculateMetricAndPushToDB)
+	clientOpts := options.Client().ApplyURI(os.Getenv("MONGO_URI")).
+		SetRetryWrites(true).
+		SetConnectTimeout(10 * time.Second)
+
+	mongoClient, err := mongo.Connect(ctx, clientOpts)
 	if err != nil {
-		log.Fatal("Error scheduling cron job:", err)
+		log.Fatalf("Mongo connection failed: %v", err)
 	}
 
+	// Setup container
+	container := &Container{
+		GraphAPIURL:         os.Getenv("GET_WEIGHT_GRAPH_API"),
+		DatabaseName:        os.Getenv("MONGO_DB"),
+		MetricsCollection:   os.Getenv("MetricsCollection"),
+		UpdateLogCollection: os.Getenv("UpdateLogCollection"),
+		MongoClient:         mongoClient,
+		HTTPClient: &http.Client{
+			Timeout: 15 * time.Second,
+		},
+	}
+
+	// Setup signal handling
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	// Start cron
+	c := cron.New()
+	_, err = c.AddFunc("*/1 * * * *", container.CalculateMetricAndPushToDB)
+	if err != nil {
+		log.Fatalf("Failed to schedule cron: %v", err)
+	}
 	c.Start()
+	log.Println("Cron job running every 1 minute")
 
-	fmt.Println("Cron job started. Running every 15 minutes...")
+	<-stop
+	log.Println("Shutdown signal received")
 
-	<-done
-
-	log.Println("Received interruption signal")
-	log.Println("Stopping cron job...")
+	ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	c.Stop()
-	log.Println("Cron job stopped")
-	log.Println("Exiting...")
+	log.Println("Cron stopped")
+
+	if err := mongoClient.Disconnect(ctx); err != nil {
+		log.Printf("Mongo disconnect error: %v", err)
+	} else {
+		log.Println("Mongo disconnected cleanly")
+	}
+}
+
+func (c *Container) CalculateMetricAndPushToDB() {
+	log.Println("Starting scheduled metric fetch...")
+
+	end := time.Now().UnixMicro()
+	start := end - 15*60*1_000_000
+
+	start, skip := c.getStartTime(start, end)
+	if skip {
+		log.Println("Skipping execution based on start time")
+		return
+	}
+
+	graphData, err := c.fetchGraphData(start, end)
+	if err != nil {
+		log.Printf("Error fetching graph data: %v", err)
+		return
+	}
+
+	if len(graphData.Nodes) == 0 || len(graphData.Edges) == 0 {
+		log.Println("Empty graph data — skipping DB insert")
+		return
+	}
+
+	if err := c.saveMetrics(Metrics{StartTime: start, EndTime: end, Data: graphData}); err != nil {
+		log.Printf("Failed to save metrics: %v", err)
+	}
+}
+
+func (c *Container) getStartTime(start, end int64) (int64, bool) {
+	const maxAllowedGap = 7 * 24 * 60 * 60 * 1_000_000 // 7 days in microseconds
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	col := c.MongoClient.Database(c.DatabaseName).Collection(c.UpdateLogCollection)
+	opts := options.FindOne().SetSort(bson.D{{Key: "last_fetch_time", Value: -1}})
+	var last UpdateLog
+	err := col.FindOne(ctx, bson.M{}, opts).Decode(&last)
+
+	if err == nil {
+		log.Printf("Last fetch time: %v", last.LastFetchTime)
+		start = last.LastFetchTime
+	} else {
+		log.Println("No last fetch time found; using default 15 mins")
+		start = end - 15*60*1_000_000
+	}
+
+	if end-start > maxAllowedGap {
+		start = end - maxAllowedGap
+		log.Printf("Capped start time to max allowed gap: %v", start)
+	}
+
+	return start, false
+}
+
+func (c *Container) fetchGraphData(start, end int64) (GraphData, error) {
+	url := fmt.Sprintf(c.GraphAPIURL, start, end)
+	log.Printf("Fetching graph from %s", url)
+
+	resp, err := c.HTTPClient.Get(url)
+	if err != nil {
+		return GraphData{}, fmt.Errorf("HTTP error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return GraphData{}, fmt.Errorf("non-200 response: %s, body: %s", resp.Status, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return GraphData{}, fmt.Errorf("failed reading response: %w", err)
+	}
+
+	var response WeightedGraphResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return GraphData{}, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return response.Data, nil
+}
+
+func (c *Container) saveMetrics(metrics Metrics) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	db := c.MongoClient.Database(c.DatabaseName)
+
+	_, err := db.Collection(c.MetricsCollection).InsertOne(ctx, metrics)
+	if err != nil {
+		return fmt.Errorf("inserting metrics failed: %w", err)
+	}
+	log.Println("Metrics inserted")
+
+	_, err = db.Collection(c.UpdateLogCollection).InsertOne(ctx, UpdateLog{LastFetchTime: metrics.EndTime})
+	if err != nil {
+		return fmt.Errorf("updating fetch time failed: %w", err)
+	}
+	log.Println("Last fetch time updated")
+	return nil
 }
