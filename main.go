@@ -133,9 +133,8 @@ func (c *Container) CalculateMetricAndPushToDB() {
 	log.Println("Starting scheduled metric fetch...")
 
 	end := time.Now().UnixMicro()
-	start := end - 15*60*1_000_000
 
-	start, skip := c.getStartTime(start, end)
+	start, skip := c.getStartTime(end)
 	if skip {
 		log.Println("Skipping execution based on start time")
 		return
@@ -157,7 +156,7 @@ func (c *Container) CalculateMetricAndPushToDB() {
 	}
 }
 
-func (c *Container) getStartTime(start, end int64) (int64, bool) {
+func (c *Container) getStartTime(end int64) (start int64, skip bool) {
 	const maxAllowedGap = 7 * 24 * 60 * 60 * 1_000_000 // 7 days in microseconds
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
